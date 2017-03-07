@@ -1,18 +1,24 @@
-﻿begin {
+﻿[cmdletbinding()]
+param()
+
+begin {
     # Set $DebugMode to $true to log every map occurrence or $false to disable
     $DebugMode = $false
 
     # Destination for error and debug logs to be copied to
-    $CentralLogPath = '\\server01\DriveMapError'
+    $CentralLogPath = '\\server01\dump\DriveMapError'
 
     # Enable debug mode if user's name is in debug user list
     if ((Get-Content "$CentralLogPath\DebugUsers.txt") -contains (whoami)) { $DebugMode = $true }
+
+    # Root to the offices and translations CSV files
+    $CsvRoot = '\\server01\netlogon\MapDrivesUtility'
 
     # Error flag - set to false when error occurs
     $ErrorFree = $true
 
     Start-Transcript -Path "$env:TEMP\MapNetworkDrive.log" -Force
-    Write-Host "Map Network Drives v2.0"
+    Write-Host "Map Network Drives v2.1"
 
     Add-Type -AssemblyName System.Windows.Forms
 
@@ -35,8 +41,8 @@
 
 process {
     # Import the csv's with our mapping rules
-    $Offices = Import-Csv -Path "\\server01\MapDrivesUtility\Offices.csv"
-    $Translations = Import-Csv -Path "\\server01\MapDrivesUtility\Translations.csv"
+    $Offices = Import-Csv -Path "$CsvRoot\Offices.csv"
+    $Translations = Import-Csv -Path "$CsvRoot\Translations.csv"
 
     # Get all groups the user is a member of that match a translated group
     $GroupsFound = Get-UserGroups
@@ -48,57 +54,77 @@ process {
     Write-Host "The following groups match a map drives translation group: [$($UserGroups -join '], [')]"
 
     Write-Host "Checking location criteria..."
-    $Locations = ($Translations | Where-Object {
+    $LocationMatches = ($Translations | Where-Object {
         $Translation = $_
         $Location = $_.Location
         Write-Host "$Location..."
 
         # Group filter
         ($Translation.GroupName -eq '' -or
-        ($Translation.GroupName -split ',' | ForEach-Object { 
-            if ($UserGroups -contains $_) {
-                Write-Host "+++$_ is in a member group: [$($Translation.GroupName)]"
-                return $true
-            } else {
-                Write-Host "---not in a member group: [$($Translation.GroupName)]"
+        ($Translation.GroupName | ForEach-Object -Begin {
+            $GroupNameMatch = $false
+        } -Process {
+            foreach ($Group in $_ -split ',') {
+                if ($UserGroups -contains $Group) { $GroupNameMatch = $true }
             }
+        } -End {
+            if ($GroupNameMatch) {
+                Write-Host "+++is in a member group: [$($Translation.GroupName)]"
+            } else {
+                Write-Host "---is not in a member group: [$($Translation.GroupName)]"
+            }
+            $GroupNameMatch
         })) -and
 
         # NOT group filter
         ($Translation.NotGroupName -eq '' -or
-        ($Translation.NotGroupName -split ',' | ForEach-Object {
-            if ($UserGroups -contains $_) {
-                Write-Host "---$_ is a member of a NOT group: [$($Translation.NotGroupName)]"
-                return $false
-            } else {
-                Write-Host "+++not a member of a NOT group: [$($Translation.NotGroupName)]"
-                $true
+        ($Translation.NotGroupName | ForEach-Object -Begin {
+            $NotGroupNameMatch = $false
+        } -Process {
+            foreach ($Group in $_ -split ',') {
+                if ($GroupsFound -notcontains $Group) { $NotGroupNameMatch = $true }
             }
+        } -End {
+            if ($NotGroupNameMatch) {
+                Write-Host "+++is not a member of an excluded group: [$($Translation.NotGroupName)]"
+            } else {
+                Write-Host "---is a member of an excluded group: [$($Translation.NotGroupName)]"
+            }
+            $NotGroupNameMatch
         })) -and
         
         # UserName filter
         ($Translation.UserName -eq '' -or
-        ($Translation.UserName -split ',' | ForEach-Object { 
-            if ((whoami) -eq $_) {
-                Write-Host "+++$_ is a member user: [$($Translation.UserName)]"
-                return $true
+        ($Translation.UserName | ForEach-Object -Begin {
+            $UserNameMatch = $false
+        } -Process { 
+            if ($_ -split ',' -contains (whoami)) {
+                Write-Host "+++$(whoami) is a member user: [$($Translation.UserName)]"
+                $UserNameMatch = $true
             } else {
                 Write-Host "---$(whoami) is not a member user: [$($Translation.UserName)]"
             }
+        } -End {
+            $UserNameMatch
         })) -and
 
         # ComputerName filter
         ($Translation.ComputerName -eq '' -or
-        ($Translation.ComputerName -split ',' | ForEach-Object { 
-            if ((hostname) -eq $_) {
-                Write-Host "+++$_ is a member computer: [$($Translation.ComputerName)]"
-                return $true
+        ($Translation.ComputerName | ForEach-Object -Begin {
+            $ComputerNameMatch = $false
+        } -Process { 
+            if ($_ -split ',' -contains $env:COMPUTERNAME) {
+                Write-Host "+++$env:COMPUTERNAME is a member computer: [$($Translation.ComputerName)]"
+                $ComputerNameMatch = $true
             } else {
-                Write-Host "---$(hostname) is not a member computer: [$($Translation.ComputerName)]"
+                Write-Host "---$env:COMPUTERNAME is not a member computer: [$($Translation.ComputerName)]"
             }
+        } -End {
+            $ComputerNameMatch
         }))
-    }).Location
-    Write-Host "Mapping the following locations: [$($Locations -join '], [')]"
+    })
+    $Locations = $LocationMatches | ForEach-Object { $_.Location }
+    Write-Host "Mapping the following locations: [$($Locations -join '], [')]" -ForegroundColor Cyan
 
     # Map the drive mappings the user is a member of
     foreach ($Location in $Locations) {
